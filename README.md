@@ -33,33 +33,6 @@ Our current POS system (Octopus) is experiencing performance issues due to direc
 
 ---
 
-
-## 📐 Demo Architecture Flow
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                         DEMO DATA FLOW                              │
-└─────────────────────────────────────────────────────────────────────┘
-
-  [POS PostgreSQL]                     [Integration PostgreSQL]
-       │                                        ▲
-       │ (1) INSERT/UPDATE                      │ (4) Consumer writes
-       │     on inventory table                 │     to cache table
-       ▼                                        │
-  ┌──────────────┐                       ┌─────────────┐
-  │  Debezium    │  (2) Captures change  │   Kafka     │
-  │  Connector   │─────────────────────→ │   Topic     │
-  └──────────────┘      via WAL          └─────────────┘
-                                               │
-                                               │ (3) Event published
-                                               ▼
-                                        ┌─────────────────┐
-                                        │  Demo Consumer  │
-                                        │                 │
-                                        └─────────────────┘
-```
----
-
 ## 📂 Proposed Project Structure
 
 ```
@@ -145,31 +118,4 @@ CREATE TABLE sync_log (
     error_message TEXT
 );
 ```
----
-
-## 🎓 Key Technical Challenges to Validate
-
-### 1. **Debezium Event Format Parsing**
-Debezium events have a complex nested JSON structure:
-```json
-{
-  "before": { "id": 1, "quantity": 100 },
-  "after": { "id": 1, "quantity": 95 },
-  "source": { "table": "inventory" },
-  "op": "u"
-}
-```
-**Validation:** Confirm we can reliably extract `before` and `after` states and map to Hibernate entities.
-
-### 2. **Dual Database Transaction Management**
-We're reading from POS DB (for initial sync) and writing to Integration DB.  
-**Validation:** Ensure Hibernate sessions don't conflict; use `@Transactional` correctly.
-
-### 3. **CDC Lag Under Load**
-What happens if Kafka consumer falls behind during high write volume?  
-**Validation:** Test with burst writes (100 updates/sec) and measure lag.
-
-### 4. **Schema Evolution**
-If POS team adds a column to `inventory`, how do we handle it?  
-**Validation:** Document manual steps for now; automate in full implementation.
 
