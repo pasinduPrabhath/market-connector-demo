@@ -1,0 +1,27 @@
+{
+  "name": "pos-inventory-connector",
+  "config": {
+    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+    "database.hostname": "192.168.1.74",
+    "database.port": "5432",
+    "database.user": "debezium_user",
+    "database.password": "debezium_pass",
+    "database.dbname": "octopus_retaildb",
+    "database.server.name": "pos",
+    "topic.prefix": "pos",
+    "table.include.list": "public.inventory",
+    "plugin.name": "pgoutput",
+    "publication.name": "dbz_publication",
+    "snapshot.mode": "initial",
+    "publication.autocreate.mode": "filtered",
+    "transforms": "unwrap",
+    "transforms.unwrap.type": "io.debezium.transforms.ExtractNewRecordState",
+    "transforms.unwrap.drop.tombstones": "false",
+    "transforms.unwrap.delete.handling.mode": "rewrite",
+    "transforms.unwrap.add.fields": "op,ts_ms",
+    "key.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "key.converter.schemas.enable": "false",
+    "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "value.converter.schemas.enable": "false"
+  }
+}
