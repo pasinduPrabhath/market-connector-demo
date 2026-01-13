@@ -1,26 +1,189 @@
 #!/bin/bash
 # note run 'chmod +x setup.sh' to make this executable
-# 1. Load variables
+
+set -e  # Exit on error
+
+# Load variables
+if [ ! -f .env ]; then
+    echo "❌ Error: .env file not found!"
+    echo "Please create .env file first. See SETUP_GUIDE.md"
+    exit 1
+fi
+
 export $(grep -v '^#' .env | xargs)
+
+# Validate required variables
+REQUIRED_VARS="SOURCE_CONNECTOR_NAME SOURCE_DB_HOST SOURCE_DB_NAME TABLE_INCLUDE_LIST SINK_CONNECTOR_NAME TARGET_DB_NAME TOPIC_PREFIX"
+for VAR in $REQUIRED_VARS; do
+    if [ -z "${!VAR}" ]; then
+        echo "❌ Error: $VAR is not set in .env file"
+        exit 1
+    fi
+done
 
 echo "🚀 Starting Market Connector Infrastructure..."
 docker-compose up -d
 
-echo "⏳ Waiting for Debezium to be ready (usually 30-45s)..."
-until curl -s http://localhost:8083/ > /dev/null; do
-  sleep 5
-  echo "...still waiting..."
+echo ""
+echo "⏳ Waiting for services to be healthy..."
+echo "   This may take 60-90 seconds on first run..."
+echo ""
+
+# Wait for services with timeout
+TIMEOUT=120
+ELAPSED=0
+
+while [ $ELAPSED -lt $TIMEOUT ]; do
+    ZOOKEEPER_HEALTHY=$(docker inspect --format='{{.State.Health.Status}}' market-connector-zookeeper 2>/dev/null || echo "starting")
+    KAFKA_HEALTHY=$(docker inspect --format='{{.State.Health.Status}}' market-connector-kafka 2>/dev/null || echo "starting")
+    POSTGRES_HEALTHY=$(docker inspect --format='{{.State.Health.Status}}' market-connector-postgres-target 2>/dev/null || echo "starting")
+    DEBEZIUM_HEALTHY=$(docker inspect --format='{{.State.Health.Status}}' market-connector-debezium 2>/dev/null || echo "starting")
+    
+    # Clear line and print status (no newlines in variables)
+    printf "\r   Zookeeper: %-10s | Kafka: %-10s | PostgreSQL: %-10s | Debezium: %-10s" \
+        "$ZOOKEEPER_HEALTHY" "$KAFKA_HEALTHY" "$POSTGRES_HEALTHY" "$DEBEZIUM_HEALTHY"
+    
+    if [ "$ZOOKEEPER_HEALTHY" = "healthy" ] && \
+       [ "$KAFKA_HEALTHY" = "healthy" ] && \
+       [ "$POSTGRES_HEALTHY" = "healthy" ] && \
+       [ "$DEBEZIUM_HEALTHY" = "healthy" ]; then
+        echo ""
+        echo ""
+        echo "✅ All services are healthy!"
+        break
+    fi
+    
+    sleep 5
+    ELAPSED=$((ELAPSED + 5))
 done
 
-echo "🔗 Registering Debezium Connector..."
-# This command swaps the ${VAR} in the template with actual values from .env
+if [ $ELAPSED -ge $TIMEOUT ]; then
+    echo ""
+    echo ""
+    echo "❌ Timeout waiting for services to be healthy!"
+    echo ""
+    echo "🔍 Service Status:"
+    docker-compose ps
+    echo ""
+    echo "📋 Check logs with:"
+    echo "  docker logs market-connector-zookeeper | tail -20"
+    echo "  docker logs market-connector-kafka | tail -20"
+    echo "  docker logs market-connector-postgres-target | tail -20"
+    echo "  docker logs market-connector-debezium | tail -20"
+    exit 1
+fi
+
+echo ""
+echo "🔗 Registering Debezium Source Connector..."
 envsubst < debezium-connector.json.template > generated-connector.json
 
-curl -i -X POST http://localhost:8083/connectors \
-  -H "Content-Type: application/json" \
-  -d @generated-connector.json
+# Debug: Show generated config
+echo "📋 Generated connector config:"
+cat generated-connector.json | jq -r '.name'
+echo "   Tables: $(cat generated-connector.json | jq -r '.config."table.include.list"')"
 
-echo "✅ Setup Complete! You can now watch logs with: docker-compose logs -f or docker exec -it market-connector-kafka kafka-console-consumer \
-  --bootstrap-server localhost:9092 \
-  --topic pos.public.inventory \
-  --from-beginning"
+RESPONSE=$(curl -s -w "\n%{http_code}" -X POST http://localhost:8083/connectors \
+  -H "Content-Type: application/json" \
+  -d @generated-connector.json)
+
+HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+BODY=$(echo "$RESPONSE" | sed '$d')
+
+if [ "$HTTP_CODE" = "201" ] || [ "$HTTP_CODE" = "409" ]; then
+    echo "✅ Source connector registered (HTTP $HTTP_CODE)"
+else
+    echo "❌ Failed to register source connector (HTTP $HTTP_CODE)"
+    echo "$BODY" | jq
+    exit 1
+fi
+
+echo ""
+echo "⏳ Waiting 15 seconds for initial snapshot to start..."
+sleep 15
+
+echo ""
+echo "🔗 Registering JDBC Sink Connector..."
+
+# IMPORTANT: Protect ${topic} from envsubst by temporarily replacing it
+sed 's/\${topic}/__TOPIC_PLACEHOLDER__/g' jdbc-sink-connector.json.template > jdbc-sink-temp.json
+
+# Substitute environment variables
+envsubst < jdbc-sink-temp.json > jdbc-sink-temp2.json
+
+# Restore ${topic}
+sed 's/__TOPIC_PLACEHOLDER__/${topic}/g' jdbc-sink-temp2.json > generated-jdbc-sink.json
+
+# Clean up temp files
+rm -f jdbc-sink-temp.json jdbc-sink-temp2.json
+
+# Debug: Show generated config
+echo "📋 Generated sink config:"
+cat generated-jdbc-sink.json | jq -r '.name'
+echo "   Table format: $(cat generated-jdbc-sink.json | jq -r '.config."table.name.format"')"
+echo "   Topics regex: $(cat generated-jdbc-sink.json | jq -r '.config."topics.regex"')"
+
+RESPONSE=$(curl -s -w "\n%{http_code}" -X POST http://localhost:8083/connectors \
+  -H "Content-Type: application/json" \
+  -d @generated-jdbc-sink.json)
+
+HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+BODY=$(echo "$RESPONSE" | sed '$d')
+
+if [ "$HTTP_CODE" = "201" ] || [ "$HTTP_CODE" = "409" ]; then
+    echo "✅ Sink connector registered (HTTP $HTTP_CODE)"
+else
+    echo "❌ Failed to register sink connector (HTTP $HTTP_CODE)"
+    echo "$BODY" | jq
+    exit 1
+fi
+
+echo ""
+echo "⏳ Waiting for initial sync (10 seconds)..."
+sleep 10
+
+echo ""
+echo "✅ Setup Complete!"
+echo ""
+echo "📊 Quick Status Check:"
+echo ""
+
+SOURCE_STATUS=$(curl -s http://localhost:8083/connectors/${SOURCE_CONNECTOR_NAME}/status)
+SINK_STATUS=$(curl -s http://localhost:8083/connectors/${SINK_CONNECTOR_NAME}/status)
+
+echo "Source Connector: $(echo $SOURCE_STATUS | jq -r '.connector.state')"
+echo "  └─ Task 0: $(echo $SOURCE_STATUS | jq -r '.tasks[0].state // "N/A"')"
+
+echo ""
+echo "Sink Connector: $(echo $SINK_STATUS | jq -r '.connector.state')"
+TASK_COUNT=$(echo $SINK_STATUS | jq '.tasks | length')
+for i in $(seq 0 $((TASK_COUNT - 1))); do
+    TASK_STATE=$(echo $SINK_STATUS | jq -r ".tasks[$i].state")
+    echo "  └─ Task $i: $TASK_STATE"
+done
+
+echo ""
+echo "📊 Monitoring Commands:"
+echo ""
+echo "1. Check connector status:"
+echo "   curl -s http://localhost:8083/connectors/${SOURCE_CONNECTOR_NAME}/status | jq"
+echo "   curl -s http://localhost:8083/connectors/${SINK_CONNECTOR_NAME}/status | jq"
+echo ""
+echo "2. List all Kafka topics:"
+echo "   docker exec market-connector-kafka kafka-topics --list --bootstrap-server localhost:9092"
+echo ""
+echo "3. Check synced record counts:"
+for TABLE in $(echo $TABLE_INCLUDE_LIST | tr ',' ' '); do
+    TABLE_NAME=$(echo $TABLE | cut -d'.' -f2)
+    echo "   docker exec market-connector-postgres-target psql -U ${TARGET_DB_USER} -d ${TARGET_DB_NAME} -c 'SELECT COUNT(*) FROM \"${TABLE_NAME}\";'"
+done
+echo ""
+echo "4. Watch Kafka messages (first table):"
+FIRST_TABLE=$(echo $TABLE_INCLUDE_LIST | cut -d',' -f1)
+echo "   docker exec market-connector-kafka kafka-console-consumer \\"
+echo "     --bootstrap-server localhost:9092 \\"
+echo "     --topic ${TOPIC_PREFIX}.${FIRST_TABLE} \\"
+echo "     --from-beginning --max-messages 5"
+echo ""
+echo "5. View connector logs:"
+echo "   docker logs -f market-connector-debezium"
+echo 

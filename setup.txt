@@ -361,3 +361,40 @@ see kafka logs
   --topic pos.public.inventory \
   --from-beginning \
   --max-messages 5
+
+===================================
+Monitoring
+
+# Check Debezium source connector status
+curl http://localhost:8083/connectors/pos-inventory-connector/status | jq
+
+# Check JDBC sink connector status
+curl http://localhost:8083/connectors/jdbc-sink-inventory/status | jq
+
+# View Kafka topic content
+docker exec -it market-connector-kafka kafka-console-consumer \
+  --bootstrap-server localhost:9092 \
+  --topic pos.public.inventory \
+  --from-beginning \
+  --max-messages 10
+
+-----------------------------------
+🧪 Testing Real-Time CDC
+After the initial snapshot completes, test real-time sync:
+
+# Connect to your POS database
+psql -h 192.168.1.74 -U debezium_user -d octopus_retaildb
+
+# Update a record
+UPDATE inventory SET quantity = 999 WHERE inventoryid = 123;
+
+# Check Kafka immediately (should see update within 1-2 seconds)
+docker exec -it market-connector-kafka kafka-console-consumer \
+  --bootstrap-server localhost:9092 \
+  --topic pos.public.inventory \
+  --from-beginning \
+  --max-messages 1
+
+# Check target DB in DBeaver
+SELECT * FROM inventory_cache WHERE inventoryid = 123;
+-- quantity should now be 999

@@ -1,5 +1,5 @@
 {
-  "name": "${CONNECTOR_NAME}",
+  "name": "${SOURCE_CONNECTOR_NAME}",
   "config": {
     "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
     "database.hostname": "${SOURCE_DB_HOST}",
@@ -9,19 +9,23 @@
     "database.dbname": "${SOURCE_DB_NAME}",
     "database.server.name": "${TOPIC_PREFIX}",
     "topic.prefix": "${TOPIC_PREFIX}",
-    "table.include.list": "${TABLE_INCLUDE}",
+    
+    "table.include.list": "${TABLE_INCLUDE_LIST}",
+    
     "plugin.name": "pgoutput",
     "publication.name": "dbz_publication",
     "snapshot.mode": "initial",
     "publication.autocreate.mode": "filtered",
+    
     "transforms": "unwrap",
     "transforms.unwrap.type": "io.debezium.transforms.ExtractNewRecordState",
     "transforms.unwrap.drop.tombstones": "false",
     "transforms.unwrap.delete.handling.mode": "rewrite",
-    "transforms.unwrap.add.fields": "op,ts_ms",
+    "transforms.unwrap.add.fields": "op,ts_ms,source.ts_ms",
+    
     "key.converter": "org.apache.kafka.connect.json.JsonConverter",
-    "key.converter.schemas.enable": "false",
+    "key.converter.schemas.enable": "true",
     "value.converter": "org.apache.kafka.connect.json.JsonConverter",
-    "value.converter.schemas.enable": "false"
+    "value.converter.schemas.enable": "true"
   }
 }
