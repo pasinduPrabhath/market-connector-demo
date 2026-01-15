@@ -104,40 +104,43 @@ sleep 15
 echo ""
 echo "🔗 Registering JDBC Sink Connector..."
 
-# IMPORTANT: Protect ${topic} from envsubst by temporarily replacing it
-sed 's/\${topic}/__TOPIC_PLACEHOLDER__/g' jdbc-sink-connector.json.template > jdbc-sink-temp.json
+SINK_TEMPLATES=(
+    "jdbc-sink-inventory.json.template"
+    "jdbc-sink-productitem.json.template"
+)
 
-# Substitute environment variables
-envsubst < jdbc-sink-temp.json > jdbc-sink-temp2.json
+for TEMPLATE in "${SINK_TEMPLATES[@]}"; do
+    if [ ! -f "$TEMPLATE" ]; then
+        echo "⚠️  Skipping $TEMPLATE (file not found)"
+        continue
+    fi
+    
+    GENERATED_FILE="generated-${TEMPLATE%.template}"
+    
+    # Generate config from template
+    envsubst < "$TEMPLATE" > "$GENERATED_FILE"
+    
+    CONNECTOR_NAME=$(jq -r '.name' "$GENERATED_FILE")
+    TABLE_NAME=$(jq -r '.config."table.name.format"' "$GENERATED_FILE")
+    
+    echo "📋 Registering: $CONNECTOR_NAME"
+    echo "   Table: $TABLE_NAME"
+    
+    # Register connector
+    HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+        -X POST http://localhost:8083/connectors \
+        -H "Content-Type: application/json" \
+        -d @"$GENERATED_FILE")
+    
+    if [ "$HTTP_CODE" = "201" ] || [ "$HTTP_CODE" = "409" ]; then
+        echo "✅ Sink connector registered (HTTP $HTTP_CODE)"
+    else
+        echo "❌ Failed to register sink connector (HTTP $HTTP_CODE)"
+    fi
+    
+    echo ""
+done
 
-# Restore ${topic}
-sed 's/__TOPIC_PLACEHOLDER__/${topic}/g' jdbc-sink-temp2.json > generated-jdbc-sink.json
-
-# Clean up temp files
-rm -f jdbc-sink-temp.json jdbc-sink-temp2.json
-
-# Debug: Show generated config
-echo "📋 Generated sink config:"
-cat generated-jdbc-sink.json | jq -r '.name'
-echo "   Table format: $(cat generated-jdbc-sink.json | jq -r '.config."table.name.format"')"
-echo "   Topics regex: $(cat generated-jdbc-sink.json | jq -r '.config."topics.regex"')"
-
-RESPONSE=$(curl -s -w "\n%{http_code}" -X POST http://localhost:8083/connectors \
-  -H "Content-Type: application/json" \
-  -d @generated-jdbc-sink.json)
-
-HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
-BODY=$(echo "$RESPONSE" | sed '$d')
-
-if [ "$HTTP_CODE" = "201" ] || [ "$HTTP_CODE" = "409" ]; then
-    echo "✅ Sink connector registered (HTTP $HTTP_CODE)"
-else
-    echo "❌ Failed to register sink connector (HTTP $HTTP_CODE)"
-    echo "$BODY" | jq
-    exit 1
-fi
-
-echo ""
 echo "⏳ Waiting for initial sync (10 seconds)..."
 sleep 10
 
@@ -154,11 +157,11 @@ echo "Source Connector: $(echo $SOURCE_STATUS | jq -r '.connector.state')"
 echo "  └─ Task 0: $(echo $SOURCE_STATUS | jq -r '.tasks[0].state // "N/A"')"
 
 echo ""
-echo "Sink Connector: $(echo $SINK_STATUS | jq -r '.connector.state')"
-TASK_COUNT=$(echo $SINK_STATUS | jq '.tasks | length')
-for i in $(seq 0 $((TASK_COUNT - 1))); do
-    TASK_STATE=$(echo $SINK_STATUS | jq -r ".tasks[$i].state")
-    echo "  └─ Task $i: $TASK_STATE"
+echo "Sink Connectors:"
+for TEMPLATE in "${SINK_TEMPLATES[@]}"; do
+    CONNECTOR_NAME=$(echo "$TEMPLATE" | sed 's/.json.template//' | sed 's/jdbc-sink-/jdbc-sink-/')
+    SINK_STATUS=$(curl -s http://localhost:8083/connectors/${CONNECTOR_NAME}/status)
+    echo "  ${CONNECTOR_NAME}: $(echo $SINK_STATUS | jq -r '.connector.state')"
 done
 
 echo ""
