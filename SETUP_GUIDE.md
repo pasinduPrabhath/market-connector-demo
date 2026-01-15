@@ -5,10 +5,11 @@
 2. [Prerequisites](#prerequisites)
 3. [Step 1: Configure Source PostgreSQL Database](#step-1-configure-source-postgresql-database)
 4. [Step 2: Configure Environment Variables](#step-2-configure-environment-variables)
-6. [Step 3: Grant Docker Permissions](#step-4-grant-docker-permissions)
-7. [Step 4: Run Setup](#step-5-run-setup)
-8. [Step 5: Verify Installation](#step-6-verify-installation)
-9. [Step 6: Connect DBeaver](#step-7-connect-dbeaver-to-target-database)
+5. [Step 3: Grant Docker Permissions](#step-3-grant-docker-permissions)
+6. [Step 4: Run Setup](#step-4-run-setup)
+7. [Step 5: Verify Installation](#step-5-verify-installation)
+8. [Step 6: Connect DBeaver](#step-6-connect-dbeaver-to-target-database)
+9. [Adding New Tables](#adding-new-tables)
 10. [Troubleshooting](#troubleshooting)
 11. [Monitoring & Maintenance](#monitoring--maintenance)
 
@@ -161,6 +162,7 @@ nano .env
 # ===========================================
 # SOURCE DATABASE (Your POS Database)
 # ===========================================
+SOURCE_CONNECTOR_NAME=pos-cdc-connector
 SOURCE_DB_HOST=192.168.1.74          # ⚠️ CHANGE: Your POS DB IP/hostname
 SOURCE_DB_PORT=5432                   # Default PostgreSQL port
 SOURCE_DB_NAME=octopus_retaildb       # ⚠️ CHANGE: Your database name
@@ -168,18 +170,19 @@ SOURCE_DB_USER=debezium_user          # Created in Step 1.4
 SOURCE_DB_PASSWORD=debezium_pass      # Created in Step 1.4
 
 # ===========================================
+# KAFKA TOPIC CONFIGURATION
+# ===========================================
+TOPIC_PREFIX=pos
+
+# Tables to sync (comma-separated, no spaces)
+TABLE_INCLUDE_LIST=public.inventory,public.productitem
+
+# ===========================================
 # TARGET DATABASE (Integration Cache)
 # ===========================================
 TARGET_DB_NAME=integration_db         # Can keep or change
 TARGET_DB_USER=integration_user       # Can keep or change
 TARGET_DB_PASSWORD=integration_pass   # ⚠️ CHANGE: Use strong password
-
-# ===========================================
-# CONNECTOR SETTINGS
-# ===========================================
-CONNECTOR_NAME=pos-inventory-connector  # Connector name in Kafka Connect
-TABLE_INCLUDE=public.inventory          # ⚠️ CHANGE: Your table (format: schema.table)
-TOPIC_PREFIX=pos                         # Kafka topic prefix
 ```
 
 **Save and exit** (`Ctrl+X`, then `Y`, then `Enter`)
@@ -191,16 +194,16 @@ cat .env
 
 ---
 
-## Step 4: Grant Docker Permissions
+## Step 3: Grant Docker Permissions
 
 **⚠️ REQUIRED: Your user must be in the `docker` group.**
 
-### 4.1 Add User to Docker Group
+### 3.1 Add User to Docker Group
 ```bash
 sudo usermod -aG docker $USER
 ```
 
-### 4.2 Apply Changes
+### 3.2 Apply Changes
 **Choose ONE option**:
 
 **Option A: Log out and log back in** (recommended)
@@ -219,7 +222,7 @@ newgrp docker
 sudo reboot
 ```
 
-### 4.3 Verify Docker Access
+### 3.3 Verify Docker Access
 ```bash
 docker ps
 # Should work WITHOUT "permission denied" error
@@ -227,15 +230,15 @@ docker ps
 
 ---
 
-## Step 5: Run Setup
+## Step 4: Run Setup
 
-### 5.1 Make Scripts Executable
+### 4.1 Make Scripts Executable
 ```bash
 cd /home/pasindu/Documents/GitHub/market-connector-demo/docker
 chmod +x setup.sh cleanup.sh
 ```
 
-### 5.2 Run Setup Script
+### 4.2 Run Setup Script
 ```bash
 ./setup.sh
 ```
@@ -249,27 +252,32 @@ chmod +x setup.sh cleanup.sh
 🔗 Registering Debezium Source Connector...
 ✅ Source connector registered (HTTP 201)
 ⏳ Waiting 15 seconds for initial snapshot to start...
-🔗 Registering JDBC Sink Connector...
+🔗 Registering JDBC Sink Connectors...
+📋 Registering: jdbc-sink-inventory
+   Table: inventory
+✅ Sink connector registered (HTTP 201)
+📋 Registering: jdbc-sink-productitem
+   Table: productitem
 ✅ Sink connector registered (HTTP 201)
 ✅ Setup Complete!
 ```
 
 **⏱️ Duration**: 2-5 minutes (depends on data size)
 
-### 5.3 What Happens During Setup
+### 4.3 What Happens During Setup
 
 1. **Docker containers start** (Zookeeper, Kafka, Debezium, PostgreSQL target)
 2. **Health checks** ensure all services are ready
 3. **Debezium source connector** registers and starts reading your POS database
-4. **Initial snapshot** copies ALL existing inventory records to Kafka
-5. **JDBC sink connector** creates target table and writes all records
+4. **Initial snapshot** copies ALL existing records to Kafka
+5. **JDBC sink connectors** create target tables and write all records
 6. **CDC monitoring begins** - Real-time changes are now captured
 
 ---
 
-## Step 6: Verify Installation
+## Step 5: Verify Installation
 
-### 6.1 Check All Containers Running
+### 5.1 Check All Containers Running
 ```bash
 docker-compose ps
 ```
@@ -283,53 +291,53 @@ market-connector-debezium            Up (healthy)
 market-connector-postgres-target     Up (healthy)
 ```
 
-### 6.2 Check Connector Status
+### 5.2 Check Connector Status
 ```bash
 # List all connectors
 curl -s http://localhost:8083/connectors | jq
 
 # Check source connector
-curl -s http://localhost:8083/connectors/pos-inventory-connector/status | jq
+curl -s http://localhost:8083/connectors/pos-cdc-connector/status | jq
 
-# Check sink connector
+# Check sink connectors
 curl -s http://localhost:8083/connectors/jdbc-sink-inventory/status | jq
+curl -s http://localhost:8083/connectors/jdbc-sink-productitem/status | jq
 ```
 
-**Expected**: Both should show `"state": "RUNNING"`
+**Expected**: All should show `"state": "RUNNING"`
 
-### 6.3 Verify Data Synced
+### 5.3 Verify Data Synced
 ```bash
-# Check record count in target database
+# Check record counts in target database
 docker exec -it market-connector-postgres-target \
   psql -U integration_user -d integration_db \
-  -c "SELECT COUNT(*) FROM inventory_cache;"
+  -c "SELECT 'inventory' AS table_name, COUNT(*) FROM inventory UNION ALL SELECT 'productitem', COUNT(*) FROM productitem;"
 ```
 
-**Expected**: Should match the count in your source database
+**Expected**: Should match the counts in your source database
 
-### 6.4 View Kafka Messages
+### 5.4 View Kafka Topics
 ```bash
-docker exec -it market-connector-kafka kafka-console-consumer \
-  --bootstrap-server localhost:9092 \
-  --topic pos.public.inventory \
-  --from-beginning \
-  --max-messages 5
-```
+# List all topics
+docker exec -it market-connector-kafka kafka-topics --list --bootstrap-server localhost:9092
 
-**Expected**: JSON messages with your inventory data
+# Should see:
+# pos.public.inventory
+# pos.public.productitem
+```
 
 ---
 
-## Step 7: Connect DBeaver to Target Database
+## Step 6: Connect DBeaver to Target Database
 
-### 7.1 Open DBeaver
+### 6.1 Open DBeaver
 
-### 7.2 Create New Connection
+### 6.2 Create New Connection
 1. Click **"New Database Connection"**
 2. Select **PostgreSQL**
 3. Click **Next**
 
-### 7.3 Connection Settings
+### 6.3 Connection Settings
 ```
 Host:       localhost
 Port:       5433         ⚠️ Note: 5433 not 5432
@@ -338,24 +346,228 @@ Username:   integration_user
 Password:   integration_pass
 ```
 
-### 7.4 Test Connection
+### 6.4 Test Connection
 Click **"Test Connection"** → Should show "Connected"
 
-### 7.5 Save and Connect
+### 6.5 Save and Connect
 
-### 7.6 Explore Data
+### 6.6 Explore Data
 ```sql
--- View table structure
-\d inventory_cache;
+-- View table structures
+\d inventory;
+\d productitem;
 
 -- Count records
-SELECT COUNT(*) FROM inventory_cache;
+SELECT COUNT(*) FROM inventory;
+SELECT COUNT(*) FROM productitem;
 
 -- View sample data
-SELECT * FROM inventory_cache LIMIT 10;
+SELECT * FROM inventory LIMIT 10;
+SELECT * FROM productitem LIMIT 10;
 
 -- Check sync metadata
 SELECT * FROM sync_log;
+```
+
+---
+
+## Adding New Tables
+
+When you want to add a new table (e.g., `orders`), follow these steps:
+
+### Step 1: Update `.env` File
+
+Add the new table to `TABLE_INCLUDE_LIST`:
+
+```bash
+nano docker/.env
+```
+
+```bash
+# Add your new table here (comma-separated, no spaces)
+TABLE_INCLUDE_LIST=public.inventory,public.productitem,public.orders
+```
+
+### Step 2: Add Table Definition to `init-target-db.sql`
+
+Edit the initialization script:
+
+```bash
+nano docker/postgres/init-target-db.sql
+```
+
+Add the CREATE TABLE statement (use your source table structure):
+
+```sql
+-- Drop table if exists
+DROP TABLE IF EXISTS public.orders CASCADE;
+
+-- ===========================================
+-- ORDERS TABLE
+-- ===========================================
+CREATE TABLE public.orders (
+    -- Auto-increment surrogate key
+    id BIGSERIAL PRIMARY KEY,
+    
+    -- Business key (used for UPSERT matching)
+    orderid BIGINT NOT NULL UNIQUE,
+    
+    -- Add ALL columns from your source table
+    customer_id INT4 NULL,
+    order_date TIMESTAMP NULL,
+    total_amount FLOAT8 NULL,
+    status VARCHAR NULL,
+    -- ... add all other columns
+    
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Create index on business key
+CREATE INDEX idx_orders_orderid ON public.orders(orderid);
+
+-- Grant permissions
+GRANT ALL PRIVILEGES ON TABLE public.orders TO integration_user;
+GRANT USAGE, SELECT ON SEQUENCE public.orders_id_seq TO integration_user;
+```
+
+**💡 Pro Tip**: Get the exact column structure from your source database:
+```bash
+psql -h 192.168.1.74 -U debezium_user -d octopus_retaildb -c "\d orders"
+```
+
+### Step 3: Create Sink Connector Template
+
+Create a new file for the sink connector:
+
+```bash
+nano docker/jdbc-sink-orders.json.template
+```
+
+Copy this template and update the highlighted values:
+
+```json
+{
+  "name": "jdbc-sink-orders",
+  "config": {
+    "connector.class": "io.debezium.connector.jdbc.JdbcSinkConnector",
+    "tasks.max": "1",
+    "topics": "${TOPIC_PREFIX}.public.orders",
+    "connection.url": "jdbc:postgresql://postgres-integration:5432/${TARGET_DB_NAME}",
+    "connection.username": "${TARGET_DB_USER}",
+    "connection.password": "${TARGET_DB_PASSWORD}",
+    "insert.mode": "upsert",
+    "delete.enabled": "true",
+    "primary.key.mode": "record_key",
+    "primary.key.fields": "orderid",
+    "schema.evolution": "basic",
+    "table.name.format": "orders"
+  }
+}
+```
+
+**What to change:**
+- Line 2: `"name"` - Unique connector name
+- Line 6: `"topics"` - Match your table name in format `${TOPIC_PREFIX}.public.{tablename}`
+- Line 12: `"primary.key.fields"` - Your table's primary key column
+- Line 14: `"table.name.format"` - Target table name
+
+### Step 4: Update `setup.sh`
+
+Edit the setup script:
+
+```bash
+nano docker/setup.sh
+```
+
+Find the `SINK_TEMPLATES` array and add your new template:
+
+```bash
+# Array of sink connector templates
+SINK_TEMPLATES=(
+    "jdbc-sink-inventory.json.template"
+    "jdbc-sink-productitem.json.template"
+    "jdbc-sink-orders.json.template"  # Add this line
+)
+```
+
+### Step 5: Run Setup
+
+```bash
+cd docker
+./cleanup.sh  # Clean up existing setup
+./setup.sh    # Run fresh setup with new table
+```
+
+### Step 6: Verify New Table
+
+```bash
+# Check connector status
+curl -s http://localhost:8083/connectors/jdbc-sink-orders/status | jq '.tasks[0].state'
+# Should show: "RUNNING"
+
+# Check record count
+docker exec market-connector-postgres-target \
+  psql -U integration_user -d integration_db \
+  -c "SELECT COUNT(*) FROM orders;"
+
+# View sample data
+docker exec market-connector-postgres-target \
+  psql -U integration_user -d integration_db \
+  -c "SELECT * FROM orders LIMIT 5;"
+```
+
+---
+
+### Quick Checklist for Adding Tables
+
+For each new table, update these **4 files**:
+
+- [ ] **`.env`** - Add to `TABLE_INCLUDE_LIST`
+- [ ] **`postgres/init-target-db.sql`** - Add `CREATE TABLE` statement
+- [ ] **`jdbc-sink-{tablename}.json.template`** - Create new sink connector config
+- [ ] **`setup.sh`** - Add template to `SINK_TEMPLATES` array
+
+Then run: `./cleanup.sh && ./setup.sh`
+
+---
+
+### Common Table Patterns
+
+#### Pattern 1: Table with Composite Key
+
+If your table has multiple columns as primary key (e.g., `order_id` + `line_item_id`):
+
+```json
+"primary.key.fields": "order_id,line_item_id"
+```
+
+#### Pattern 2: Table with Different Column Names
+
+If your source and target tables have different column names, you need to handle this in the init script:
+
+```sql
+CREATE TABLE public.target_table (
+    id BIGSERIAL PRIMARY KEY,
+    source_column_name BIGINT NOT NULL UNIQUE,  -- Match source column name
+    -- other columns
+);
+```
+
+#### Pattern 3: Table Without Natural Key
+
+If your table doesn't have a business key, use an auto-generated ID:
+
+```sql
+CREATE TABLE public.logs (
+    id BIGSERIAL PRIMARY KEY,
+    log_entry_id BIGINT GENERATED ALWAYS AS IDENTITY,
+    -- other columns
+);
+```
+
+```json
+"primary.key.mode": "record_value",
+"primary.key.fields": "log_entry_id"
 ```
 
 ---
@@ -393,12 +605,12 @@ docker logs market-connector-postgres-target
 
 **Check detailed error**:
 ```bash
-curl -s http://localhost:8083/connectors/pos-inventory-connector/status | jq '.tasks[0].trace'
+curl -s http://localhost:8083/connectors/pos-cdc-connector/status | jq '.tasks[0].trace'
 ```
 
 **Common issues**:
 1. **Can't connect to source DB** - Check SOURCE_DB_HOST, firewall, credentials
-2. **Table doesn't exist** - Verify TABLE_INCLUDE matches your table name
+2. **Table doesn't exist** - Verify TABLE_INCLUDE_LIST matches your table names
 3. **Permission denied** - Verify debezium_user has proper grants
 
 ---
@@ -408,23 +620,54 @@ curl -s http://localhost:8083/connectors/pos-inventory-connector/status | jq '.t
 **Check**:
 ```bash
 # 1. Is source connector running?
-curl -s http://localhost:8083/connectors/pos-inventory-connector/status | jq '.connector.state'
+curl -s http://localhost:8083/connectors/pos-cdc-connector/status | jq '.connector.state'
 
 # 2. Are messages in Kafka?
 docker exec -it market-connector-kafka kafka-topics --list --bootstrap-server localhost:9092
 
 # 3. Check sink connector
 curl -s http://localhost:8083/connectors/jdbc-sink-inventory/status | jq '.tasks[0].state'
+
+# 4. View Kafka messages
+docker exec market-connector-kafka kafka-console-consumer \
+  --bootstrap-server localhost:9092 \
+  --topic pos.public.inventory \
+  --from-beginning --max-messages 1
 ```
 
 ---
 
-### ❌ Problem: "Unable to determine Dialect" error
+### ❌ Problem: New table not syncing
 
-**Solution**: Verify `hibernate.dialect` is set in `jdbc-sink-connector.json.template`:
-```json
-"hibernate.dialect": "org.hibernate.dialect.PostgreSQLDialect"
+**Troubleshoot**:
+```bash
+# 1. Check if topic was created
+docker exec market-connector-kafka kafka-topics --list --bootstrap-server localhost:9092 | grep "your_table"
+
+# 2. Check if connector exists
+curl -s http://localhost:8083/connectors | jq
+
+# 3. Check connector status
+curl -s http://localhost:8083/connectors/jdbc-sink-your-table/status | jq
+
+# 4. View connector logs
+docker logs market-connector-debezium | grep "your_table"
 ```
+
+---
+
+### ❌ Problem: CDC metadata columns appearing in target
+
+If you see `__deleted`, `__op`, `__ts_ms` columns:
+
+**Solution**: These are added for delete handling. The `__deleted` column is necessary for soft-delete functionality. To use hard deletes instead:
+
+Edit `debezium-connector.json.template`:
+```json
+"transforms.unwrap.delete.handling.mode": "drop"
+```
+
+This will send actual DELETE operations instead of marking records as deleted.
 
 ---
 
@@ -450,17 +693,26 @@ docker logs market-connector-debezium
 
 **Check connector health**:
 ```bash
-curl -s http://localhost:8083/connectors/pos-inventory-connector/status | jq '.connector.state'
-curl -s http://localhost:8083/connectors/jdbc-sink-inventory/status | jq '.tasks[0].state'
+# Quick status check of all connectors
+curl -s http://localhost:8083/connectors | jq -r '.[]' | while read connector; do
+  echo -n "$connector: "
+  curl -s http://localhost:8083/connectors/$connector/status | jq -r '.connector.state'
+done
 ```
 
-**Check lag** (how far behind is the sync):
+**Check data sync lag**:
 ```bash
-# Source DB count
-psql -h 192.168.1.74 -U debezium_user -d octopus_retaildb -c "SELECT COUNT(*) FROM inventory;"
+# Source DB counts
+psql -h 192.168.1.74 -U debezium_user -d octopus_retaildb -c "
+  SELECT 'inventory' AS table_name, COUNT(*) FROM inventory
+  UNION ALL
+  SELECT 'productitem', COUNT(*) FROM productitem;"
 
-# Target DB count
-docker exec -it market-connector-postgres-target psql -U integration_user -d integration_db -c "SELECT COUNT(*) FROM inventory_cache;"
+# Target DB counts
+docker exec market-connector-postgres-target psql -U integration_user -d integration_db -c "
+  SELECT 'inventory' AS table_name, COUNT(*) FROM inventory
+  UNION ALL
+  SELECT 'productitem', COUNT(*) FROM productitem;"
 ```
 
 ### View Logs
@@ -470,21 +722,58 @@ docker-compose logs -f
 
 # Specific service
 docker logs -f market-connector-debezium
+docker logs -f market-connector-kafka
+
+# Last 100 lines
+docker logs --tail 100 market-connector-debezium
 ```
 
 ### Restart Connectors
 ```bash
 # Restart source connector
-curl -X POST http://localhost:8083/connectors/pos-inventory-connector/restart
+curl -X POST http://localhost:8083/connectors/pos-cdc-connector/restart
 
-# Restart sink connector
+# Restart specific sink connector
 curl -X POST http://localhost:8083/connectors/jdbc-sink-inventory/restart
+
+# Restart all connectors
+curl -s http://localhost:8083/connectors | jq -r '.[]' | while read connector; do
+  curl -X POST http://localhost:8083/connectors/$connector/restart
+  echo "Restarted: $connector"
+done
+```
+
+### Pause/Resume Connectors
+```bash
+# Pause connector (stops processing, no data loss)
+curl -X PUT http://localhost:8083/connectors/jdbc-sink-inventory/pause
+
+# Resume connector
+curl -X PUT http://localhost:8083/connectors/jdbc-sink-inventory/resume
+```
+
+### Delete Connector
+```bash
+# Delete connector (keeps data in target DB)
+curl -X DELETE http://localhost:8083/connectors/jdbc-sink-inventory
+
+# Re-register if needed
+cd docker
+export $(grep -v '^#' .env | xargs)
+envsubst < jdbc-sink-inventory.json.template > generated-jdbc-sink-inventory.json
+curl -X POST http://localhost:8083/connectors \
+  -H "Content-Type: application/json" \
+  -d @generated-jdbc-sink-inventory.json
 ```
 
 ### Complete Cleanup and Restart
 ```bash
 # Stop everything and delete all data
 ./cleanup.sh
+
+# When prompted:
+# - Remove Docker images? N (unless updating)
+# - Prune system? Y (to clean up unused resources)
 
 # Start fresh
 ./setup.sh
@@ -497,19 +786,19 @@ curl -X POST http://localhost:8083/connectors/jdbc-sink-inventory/restart
 ### Test 1: Insert New Record
 ```sql
 -- In your POS database
-INSERT INTO inventory (productitem, quantity, currentcost, retailsalesprice, movementdate, organisation_id)
-VALUES (12345, 100, 25.50, 49.99, CURRENT_DATE, 1);
+INSERT INTO inventory (inventoryid, productitem, quantity, currentcost, retailsalesprice, movementdate, organisation_id)
+VALUES (999999, 12345, 100, 25.50, 49.99, CURRENT_DATE, 1);
 ```
 
 **Wait 2-5 seconds**, then check target DB:
 ```sql
-SELECT * FROM inventory_cache WHERE productitem = 12345;
+SELECT * FROM inventory WHERE inventoryid = 999999;
 ```
 
 ### Test 2: Update Record
 ```sql
 -- In POS database
-UPDATE inventory SET quantity = 150 WHERE inventoryid = 123;
+UPDATE inventory SET quantity = 150 WHERE inventoryid = 999999;
 ```
 
 **Check target DB** - quantity should update within seconds
@@ -517,10 +806,30 @@ UPDATE inventory SET quantity = 150 WHERE inventoryid = 123;
 ### Test 3: Delete Record
 ```sql
 -- In POS database
-DELETE FROM inventory WHERE inventoryid = 999;
+DELETE FROM inventory WHERE inventoryid = 999999;
 ```
 
-**Check target DB** - record should be deleted
+**Check target DB** - record should be deleted (or `__deleted = true` if using soft deletes)
+
+### Test 4: Bulk Operations
+```sql
+-- Insert 100 records
+INSERT INTO inventory (inventoryid, productitem, quantity, organisation_id)
+SELECT generate_series(900000, 900099), 12345, 10, 1;
+```
+
+**Monitor sync**:
+```bash
+# Watch Kafka lag
+docker exec market-connector-kafka kafka-consumer-groups \
+  --bootstrap-server localhost:9092 \
+  --group connect-jdbc-sink-inventory \
+  --describe
+
+# Check target count
+docker exec market-connector-postgres-target psql -U integration_user -d integration_db \
+  -c "SELECT COUNT(*) FROM inventory WHERE inventoryid BETWEEN 900000 AND 900099;"
+```
 
 ---
 
@@ -532,13 +841,32 @@ DELETE FROM inventory WHERE inventoryid = 999;
 ```json
 "snapshot.fetch.size": "10000",
 "max.batch.size": "2048",
-"max.queue.size": "16384"
+"max.queue.size": "16384",
+"poll.interval.ms": "100"
 ```
 
-**Edit `jdbc-sink-connector.json.template`**:
+**Edit sink connector templates**:
 ```json
-"tasks.max": "4",
-"batch.size": "3000"
+"tasks.max": "3",
+"batch.size": "3000",
+"consumer.max.poll.records": "500"
+```
+
+### Optimize PostgreSQL Target
+
+```bash
+docker exec -it market-connector-postgres-target psql -U integration_user -d integration_db
+```
+
+```sql
+-- Increase shared buffers
+ALTER SYSTEM SET shared_buffers = '256MB';
+
+-- Increase work memory
+ALTER SYSTEM SET work_mem = '16MB';
+
+-- Reload config
+SELECT pg_reload_conf();
 ```
 
 ---
@@ -546,10 +874,46 @@ DELETE FROM inventory WHERE inventoryid = 999;
 ## Security Best Practices
 
 1. **Change default passwords** in `.env`
-2. **Use SSL for PostgreSQL connections** (add `?sslmode=require` to connection URLs)
+2. **Use SSL for PostgreSQL connections**:
+   ```json
+   "connection.url": "jdbc:postgresql://source:5432/db?sslmode=require"
+   ```
 3. **Restrict network access** - Use firewall rules
 4. **Rotate credentials** regularly
-5. **Monitor access logs**
+5. **Monitor access logs**:
+   ```bash
+   docker logs market-connector-postgres-target | grep "authentication"
+   ```
+6. **Limit connector permissions** - Don't use SUPERUSER in production
+
+---
+
+## Backup and Recovery
+
+### Backup Target Database
+```bash
+# Full backup
+docker exec market-connector-postgres-target pg_dump \
+  -U integration_user -d integration_db > backup_$(date +%Y%m%d).sql
+
+# Compressed backup
+docker exec market-connector-postgres-target pg_dump \
+  -U integration_user -d integration_db | gzip > backup_$(date +%Y%m%d).sql.gz
+```
+
+### Restore from Backup
+```bash
+# Stop connectors first
+curl -X PUT http://localhost:8083/connectors/jdbc-sink-inventory/pause
+
+# Restore
+gunzip -c backup_20260115.sql.gz | \
+  docker exec -i market-connector-postgres-target \
+  psql -U integration_user -d integration_db
+
+# Resume connectors
+curl -X PUT http://localhost:8083/connectors/jdbc-sink-inventory/resume
+```
 
 ---
 
@@ -558,5 +922,19 @@ DELETE FROM inventory WHERE inventoryid = 999;
 - **Debezium Documentation**: https://debezium.io/documentation/
 - **Kafka Connect**: https://kafka.apache.org/documentation/#connect
 - **PostgreSQL CDC**: https://www.postgresql.org/docs/current/logical-replication.html
+- **JDBC Sink Connector**: https://docs.confluent.io/kafka-connect-jdbc/current/
 
 ---
+
+## Support
+
+If you encounter issues not covered in this guide:
+
+1. **Check logs**: `docker logs market-connector-debezium`
+2. **Search Debezium issues**: https://github.com/debezium/debezium/issues
+3. **Check connector status**: `curl http://localhost:8083/connectors/{name}/status | jq`
+
+---
+
+**Last Updated**: January 2026  
+**Version**: 2.0
