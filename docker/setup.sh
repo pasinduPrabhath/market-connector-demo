@@ -12,15 +12,6 @@ fi
 
 export $(grep -v '^#' .env | xargs)
 
-# Validate required variables
-REQUIRED_VARS="SOURCE_CONNECTOR_NAME SOURCE_DB_HOST SOURCE_DB_NAME TABLE_INCLUDE_LIST SINK_CONNECTOR_NAME TARGET_DB_NAME TOPIC_PREFIX"
-for VAR in $REQUIRED_VARS; do
-    if [ -z "${!VAR}" ]; then
-        echo "❌ Error: $VAR is not set in .env file"
-        exit 1
-    fi
-done
-
 echo "🚀 Starting Market Connector Infrastructure..."
 docker-compose up -d
 
