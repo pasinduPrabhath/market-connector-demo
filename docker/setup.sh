@@ -142,7 +142,6 @@ echo "📊 Quick Status Check:"
 echo ""
 
 SOURCE_STATUS=$(curl -s http://localhost:8083/connectors/${SOURCE_CONNECTOR_NAME}/status)
-SINK_STATUS=$(curl -s http://localhost:8083/connectors/${SINK_CONNECTOR_NAME}/status)
 
 echo "Source Connector: $(echo $SOURCE_STATUS | jq -r '.connector.state')"
 echo "  └─ Task 0: $(echo $SOURCE_STATUS | jq -r '.tasks[0].state // "N/A"')"
@@ -150,9 +149,12 @@ echo "  └─ Task 0: $(echo $SOURCE_STATUS | jq -r '.tasks[0].state // "N/A"')
 echo ""
 echo "Sink Connectors:"
 for TEMPLATE in "${SINK_TEMPLATES[@]}"; do
-    CONNECTOR_NAME=$(echo "$TEMPLATE" | sed 's/.json.template//' | sed 's/jdbc-sink-/jdbc-sink-/')
-    SINK_STATUS=$(curl -s http://localhost:8083/connectors/${CONNECTOR_NAME}/status)
-    echo "  ${CONNECTOR_NAME}: $(echo $SINK_STATUS | jq -r '.connector.state')"
+    CONNECTOR_NAME=$(jq -r '.name' "$TEMPLATE" | envsubst)
+    SINK_STATUS=$(curl -s http://localhost:8083/connectors/${CONNECTOR_NAME}/status 2>/dev/null)
+    if [ ! -z "$SINK_STATUS" ]; then
+        echo "  ${CONNECTOR_NAME}: $(echo $SINK_STATUS | jq -r '.connector.state')"
+        echo "    └─ Task 0: $(echo $SINK_STATUS | jq -r '.tasks[0].state // "N/A"')"
+    fi
 done
 
 echo ""
@@ -160,7 +162,8 @@ echo "📊 Monitoring Commands:"
 echo ""
 echo "1. Check connector status:"
 echo "   curl -s http://localhost:8083/connectors/${SOURCE_CONNECTOR_NAME}/status | jq"
-echo "   curl -s http://localhost:8083/connectors/${SINK_CONNECTOR_NAME}/status | jq"
+echo "   curl -s http://localhost:8083/connectors/jdbc-sink-inventory/status | jq"
+echo "   curl -s http://localhost:8083/connectors/jdbc-sink-productitem/status | jq"
 echo ""
 echo "2. List all Kafka topics:"
 echo "   docker exec market-connector-kafka kafka-topics --list --bootstrap-server localhost:9092"
@@ -180,4 +183,11 @@ echo "     --from-beginning --max-messages 5"
 echo ""
 echo "5. View connector logs:"
 echo "   docker logs -f market-connector-debezium"
-echo 
+echo ""
+echo "6. Connect to target database (DBeaver):"
+echo "   Host: localhost"
+echo "   Port: 5433"
+echo "   Database: ${TARGET_DB_NAME}"
+echo "   Username: ${TARGET_DB_USER}"
+echo "   Password: (see .env file)"
+echo
